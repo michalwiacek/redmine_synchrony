@@ -26,6 +26,10 @@ module Synchrony
     end
 
     def sync_issues
+      pull_issues && push_issues
+    end
+
+    def pull_issues
       created_issues = 0
       updated_issues = 0
 
@@ -49,6 +53,23 @@ module Synchrony
         end
       end
       Rails.logger.info "Site '#{source_site}' issues created: #{created_issues}, issues updated: #{updated_issues}"
+    end
+
+    def push_issues
+      created_issues = 0
+
+      issues = Issue.where( tracker_id: source_tracker.id, synchrony_id: nil )
+      issues.each do |issue|
+        attributes = issue.attributes.tap { |attrs| ['id'].map{|key| attrs.delete(key) } }
+        remote_issue = RemoteIssue.new(attributes)
+        if remote_issue.save
+          remote_updated_on = Time.parse(remote_issue.updated_on)
+          update_journals(issue, remote_issue)
+          issue.update_columns(synchrony_id: remote_issue.id, synchronized_at: remote_updated_on)
+          created_issues += 1
+        end
+      end
+      Rails.logger.info "Site '#{source_site}' issues created: #{created_issues}"
     end
 
     private
