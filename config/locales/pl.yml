@@ -1,0 +1,13 @@
+pl:
+
+  synchrony:
+    settings:
+      source_site: "Strona źródłowa"
+      api_key: "Klucz API"
+      source_tracker: "Śledzenie źródła"
+      target_project: "Lokalny projekt docelowy"
+      target_tracker: "Lokalny tracker docelowy"
+      language: "Język dla notatek"
+  errors:
+    messages:
+      uniqueness: "musi być unikalne"
