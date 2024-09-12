@@ -1,5 +1,6 @@
-module Synchrony
+# frozen_string_literal: true
 
+module Synchrony
   class Updater
     attr_reader :settings
 
@@ -7,14 +8,14 @@ module Synchrony
 
     def initialize(settings)
       @settings = settings
-      Rails.logger = Logger.new(STDOUT) unless Rails.env.test?
-      I18n.locale = @settings['language'].to_sym if @settings['language'].present?
+      Rails.logger = Logger.new($stdout) unless Rails.env.test?
+      I18n.locale = @settings["language"].to_sym if @settings["language"].present?
       prepare_remote_resources
       prepare_local_resources
     end
 
     def self.default_date
-      Date.today
+      Time.zone.today
     end
 
     def sync_date
@@ -34,20 +35,20 @@ module Synchrony
       updated_issues = 0
 
       issues = RemoteIssue.all(params: { tracker_id: source_tracker.id,
-                                         limit: LIMIT,
-                                         status_id: '*',
+                                         limit:      LIMIT,
+                                         status_id:  "*",
                                          updated_on: ">=#{sync_date.strftime('%Y-%m-%d')}" })
       issues.each do |remote_issue|
         issue = Issue.where(synchrony_id: remote_issue.id, project_id: target_project).first
         if issue.present?
-          remote_updated_on = Time.parse(remote_issue.updated_on)
+          remote_updated_on = Time.zone.parse(remote_issue.updated_on)
           if issue.synchronized_at != remote_updated_on
             update_journals(issue, remote_issue)
             issue.update_column(:synchronized_at, remote_updated_on)
             updated_issues += 1
           end
         else
-          issue = create_issue(remote_issue) unless issue.present?
+          issue = create_issue(remote_issue) if issue.blank?
           update_journals(issue, remote_issue)
           created_issues += 1
         end
@@ -58,16 +59,16 @@ module Synchrony
     def push_issues
       created_issues = 0
 
-      issues = Issue.where( tracker_id: source_tracker.id, synchrony_id: nil )
+      issues = Issue.where(tracker_id: source_tracker.id, synchrony_id: nil)
       issues.each do |issue|
-        attributes = issue.attributes.tap { |attrs| ['id'].map{|key| attrs.delete(key) } }
+        attributes = issue.attributes.tap { |attrs| ["id"].map { |key| attrs.delete(key) } }
         remote_issue = RemoteIssue.new(attributes)
-        if remote_issue.save
-          remote_updated_on = Time.parse(remote_issue.updated_on)
-          update_journals(issue, remote_issue)
-          issue.update_columns(synchrony_id: remote_issue.id, synchronized_at: remote_updated_on)
-          created_issues += 1
-        end
+        next unless remote_issue.save
+
+        remote_updated_on = Time.zone.parse(remote_issue.updated_on)
+        update_journals(issue, remote_issue)
+        issue.update_columns(synchrony_id: remote_issue.id, synchronized_at: remote_updated_on)
+        created_issues += 1
       end
       Rails.logger.info "Site '#{source_site}' issues created: #{created_issues}"
     end
@@ -75,76 +76,84 @@ module Synchrony
     private
 
     def prepare_remote_resources
-      [RemoteTracker, RemoteIssue, RemoteIssueStatus, RemoteUser, RemoteIssuePriority].each do |resource_class|
+      [RemoteTracker, RemoteIssue, RemoteIssueStatus, RemoteUser,
+       RemoteIssuePriority].each do |resource_class|
         resource_class.site = source_site
-        resource_class.headers['X-Redmine-API-Key'] = api_key
+        resource_class.headers["X-Redmine-API-Key"] = api_key
       end
       begin
-        unless source_tracker.present?
-          raise Errors::InvalidSourceTrackerError.new(settings['source_tracker'], source_site)
+        if source_tracker.blank?
+          raise Errors::InvalidSourceTrackerError.new(settings["source_tracker"], source_site)
         end
       rescue SocketError
-        raise Errors::InvalidSourceSiteError.new(source_site)
+        raise Errors::InvalidSourceSiteError, source_site
       end
     end
 
     def prepare_local_resources
-      raise Errors::InvalidSettingError.new('target_project') unless target_project.present?
-      raise Errors::InvalidSettingError.new('target_tracker') unless target_tracker.present?
-      target_project.trackers << target_tracker unless target_project.trackers.include?(target_tracker)
+      raise Errors::InvalidSettingError, "target_project" if target_project.blank?
+      raise Errors::InvalidSettingError, "target_tracker" if target_tracker.blank?
+
+      return if target_project.trackers.include?(target_tracker)
+
+      target_project.trackers << target_tracker
     end
 
     def source_site
-      raise Errors::InvalidSettingError.new('source_site') unless settings['source_site'].present?
-      @source_site ||= if settings['source_site'].end_with?('/')
-                         settings['source_site']
+      raise Errors::InvalidSettingError, "source_site" if settings["source_site"].blank?
+
+      @source_site ||= if settings["source_site"].end_with?("/")
+                         settings["source_site"]
                        else
                          "#{settings['source_site']}/"
                        end
     end
 
     def api_key
-      raise Errors::InvalidSettingError.new('api_key') unless settings['api_key'].present?
-      @api_key ||= settings['api_key']
+      raise Errors::InvalidSettingError, "api_key" if settings["api_key"].blank?
+
+      @api_key ||= settings["api_key"]
     end
 
     def source_tracker
-      raise Errors::InvalidSettingError.new('source_tracker') unless settings['source_tracker'].present?
-      @source_tracker ||= RemoteTracker.all.
-          find{ |t| t.name.mb_chars.downcase == settings['source_tracker'].mb_chars.downcase }
+      raise Errors::InvalidSettingError, "source_tracker" if settings["source_tracker"].blank?
+
+      @source_tracker ||= RemoteTracker.all
+                            .find { |t| t.name.mb_chars.casecmp(settings["source_tracker"].mb_chars).zero? }
     end
 
     def target_project
-      @target_project ||= Project.where(id: settings['target_project']).first
+      @target_project ||= Project.where(id: settings["target_project"]).first
     end
 
     def target_tracker
-      @target_tracker ||= Tracker.where(id: settings['target_tracker']).first
+      @target_tracker ||= Tracker.where(id: settings["target_tracker"]).first
     end
 
     def create_issue(remote_issue)
       description = "#{source_site}issues/#{remote_issue.id}\n\n________________\n\n#{remote_issue.description}"
       Issue.create(
-          synchrony_id: remote_issue.id,
-          subject: remote_issue.subject,
-          description: description,
-          tracker: target_tracker,
-          project: target_project,
-          author: User.anonymous,
-          synchronized_at: Time.parse(remote_issue.updated_on)
+        synchrony_id:    remote_issue.id,
+        subject:         remote_issue.subject,
+        description:     description,
+        tracker:         target_tracker,
+        project:         target_project,
+        author:          User.anonymous,
+        synchronized_at: Time.zone.parse(remote_issue.updated_on)
       )
     end
 
     def update_journals(issue, remote_issue)
-      remote_issue = RemoteIssue.find(remote_issue.id, params: {include: :journals})
+      remote_issue = RemoteIssue.find(remote_issue.id, params: { include: :journals })
       remote_issue.journals.each do |remote_journal|
         journal = issue.journals.where(synchrony_id: remote_journal.id).first
-        unless journal.present?
-          notes = "h3. \"#{remote_journal.user.name}\":#{source_site}users/#{remote_journal.user.id}:\n\n" +
-              "#{journal_details(remote_journal)}#{remote_journal.notes}"
+        if journal.blank?
+          notes = "h3. \"#{remote_journal.user.name}\":#{source_site}users/#{remote_journal.user.id}:\n\n" \
+                  "#{journal_details(remote_journal)}#{remote_journal.notes}"
           Journal.transaction do
-            journal = issue.journals.create(user: User.anonymous, notes: notes, synchrony_id: remote_journal.id)
-            Journal.where(id: journal.id).update_all(created_on: Time.parse(remote_journal.created_on))
+            journal = issue.journals.create(user: User.anonymous, notes: notes,
+                                            synchrony_id: remote_journal.id)
+            Journal.where(id: journal.id).update_all(created_on: Time.zone.parse(remote_journal.created_on))
           end
         end
         issue.journals.reload
@@ -154,49 +163,48 @@ module Synchrony
     end
 
     def journal_details(remote_journal)
-      return '' if remote_journal.details.empty?
+      return "" if remote_journal.details.empty?
+
       remote_journal.details.map do |detail|
-        if detail.property == 'attr' && %w(status_id assigned_to_id priority_id).include?(detail.name)
-          self.send("details_for_#{detail.name}", detail)
+        if detail.property == "attr" && %w[status_id assigned_to_id priority_id].include?(detail.name)
+          send("details_for_#{detail.name}", detail)
         end
-      end.reject{ |d| d.blank? }.join("\n") + "\n\n"
+      end.reject(&:blank?).join("\n") + "\n\n"
     end
 
     def details_for_status_id(detail)
-      result = ''
+      result = ""
       old_status = RemoteIssueStatus.by_id(detail.old_value)
       new_status = RemoteIssueStatus.by_id(detail.new_value)
       result << "*#{I18n.t(:label_issue_status)}:* "
       result << old_status.name if old_status
-      result << ' >> '
+      result << " >> "
       result << new_status.name if new_status
       result
     end
 
     def details_for_assigned_to_id(detail)
-      result = ''
+      result = ""
       old_user = RemoteUser.by_id(detail.old_value) if detail.old_value.present?
       new_user = RemoteUser.by_id(detail.new_value) if detail.new_value.present?
       result << "*#{I18n.t(:field_assigned_to)}:* "
       result << "#{old_user.firstname} #{old_user.lastname}" if old_user
-      result << ' >> '
+      result << " >> "
       result << "#{new_user.firstname} #{new_user.lastname}" if new_user
       result
     end
 
     def details_for_priority_id(detail)
-      result = ''
+      result = ""
       old_priority = RemoteIssuePriority.by_id(detail.old_value)
       new_priority = RemoteIssuePriority.by_id(detail.new_value)
       if old_priority || new_priority
         result << "*#{I18n.t(:field_priority)}:* "
         result << old_priority.name if old_priority
-        result << ' >> '
+        result << " >> "
         result << new_priority.name if new_priority
       end
       result
     end
-
   end
-
 end
